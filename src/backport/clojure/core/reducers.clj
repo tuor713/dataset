@@ -11,7 +11,7 @@
       to change."
       :author "Rich Hickey"}
   backport.clojure.core.reducers
-  (:refer-clojure :exclude [reduce map mapcat filter remove take take-while drop flatten partition])
+  (:refer-clojure :exclude [reduce map mapcat filter remove take take-while drop flatten partition partition-all])
   (:require [clojure.walk :as walk]
             backport.clojure.core.protocols))
 
@@ -206,9 +206,51 @@
                        (swap! accu clojure.core/conj v)
                        (if (= (count @accu) n)
                          (let [ret# (f1 ret @accu)]
-                           (swap! accu (fn [v] (clojure.core/subvec v step)))
+                           (swap! accu subvec step)
                            ret#)
                          ret))))))))
+
+(defn uncounted-cat [left right]
+  (reify
+    clojure.lang.Seqable
+    (seq [_] (concat (seq left) (seq right)))
+
+    backport.clojure.core.protocols/CollReduce
+    (coll-reduce [this f1] (backport.clojure.core.protocols/coll-reduce this f1 (f1)))
+    (coll-reduce
+      [_  f1 init]
+      (backport.clojure.core.protocols/coll-reduce
+       right f1
+       (backport.clojure.core.protocols/coll-reduce left f1 init)))))
+
+(defn partition-all
+  ([n coll] (partition-all n n coll))
+  ([n step coll]
+     (let [o (Object.)]
+       (reducer (uncounted-cat coll (repeat o))
+                (fn [f1]
+                  (let [accu (atom [])]
+                    (fn 
+                      ([] (f1))
+                      ([ret v]
+                         (swap! accu clojure.core/conj v)
+                         (cond 
+                          (= (last @accu) o)
+                          (let [sanitized (clojure.core/remove #{o} @accu)]
+                            (backport.clojure.core.protocols/reduced 
+                             (if (empty? sanitized)
+                               ret
+                               (f1 ret sanitized))))
+
+                          (= (count @accu) n)
+                          (let [ret# (f1 ret @accu)]
+                            (swap! accu subvec step)
+                            ret#)
+
+                          :else ret)))))))))
+
+
+
 
 (defn group-by 
   "Returns a map of the elements of coll keyed by the result of

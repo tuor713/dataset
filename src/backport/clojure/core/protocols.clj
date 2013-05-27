@@ -190,7 +190,7 @@
 ;; Parts of clojure.core 1.5 functionality
 ;; replicated into this namespace for consistency
 
-(defrecord Reduced [v]
+(deftype Reduced [v]
   clojure.lang.IDeref
   (deref [_] v))
 

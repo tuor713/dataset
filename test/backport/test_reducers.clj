@@ -32,19 +32,32 @@ Also test various clojure.core functions ported to reducers namespace (reduce, i
 
 (deftest test-partition
   ;; standard case
-  (is (= [[0 1] [2 3]]
+  (is (= (partition 2 (range 4))
          (r/into [] (r/partition 2 (range 4)))))
 
   ;; superfluous items at the end get dropped
-  (is (= [[0 1] [2 3]]
+  (is (= (partition 2 (range 5))
          (r/into [] (r/partition 2 (range 5)))))
 
   ;; overlapping windows
-  (is (= [[0 1] [1 2] [2 3] [3 4]]
+  (is (= (partition 2 1 (range 5))
          (r/into [] (r/partition 2 1 (range 5))))))
+
+(deftest test-partition-all
+  ;; standard case
+  (is (= (partition-all 2 (range 4))
+         (r/into [] (r/partition-all 2 (range 4)))))
+  
+  ;; superfluous items at the end get shortened
+  (is (= (partition-all 2 (range 5))
+         (r/into [] (r/partition-all 2 (range 5)))))
+
+  ;; overlapping windows
+  (is (= (partition-all 2 1 (range 5))
+         (r/into [] (r/partition-all 2 1 (range 5))))))
 
 
 (deftest test-group-by
-  (is (= {true [0 2 4] false [1 3]}
+  (is (= (group-by even? (range 5))
          (r/group-by even? (range 5)))))
 
