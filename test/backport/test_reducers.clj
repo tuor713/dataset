@@ -61,3 +61,7 @@ Also test various clojure.core functions ported to reducers namespace (reduce, i
   (is (= (group-by even? (range 5))
          (r/group-by even? (range 5)))))
 
+(deftest test-count
+  (is (= 4 (r/count [1 2 3 4])))
+  (is (= 4 (r/count (r/map inc [1 2 3 4]))))
+  (is (= 0 (r/count (r/map inc [])))))

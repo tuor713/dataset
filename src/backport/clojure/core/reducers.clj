@@ -11,7 +11,8 @@
       to change."
       :author "Rich Hickey"}
   backport.clojure.core.reducers
-  (:refer-clojure :exclude [reduce map mapcat filter remove take take-while drop flatten partition partition-all])
+  (:refer-clojure :exclude [into reduce map mapcat filter remove take take-while 
+                            drop flatten partition partition-all group-by count])
   (:require [clojure.walk :as walk]
             backport.clojure.core.protocols))
 
@@ -117,6 +118,11 @@
      (rfn [f1 k]
           ([ret k v]
              (reduce f1 ret (f k v)))))))
+
+(defn count [coll]
+  (if (instance? clojure.lang.Counted coll)
+    (clojure.core/count coll)
+    (reduce + 0 (map (constantly 1) coll))))
 
 (defcurried filter
   "Retains values in the reduction of coll for which (pred val)
@@ -263,6 +269,8 @@
       (let [k (f x)]
         (assoc! ret k (conj (get ret k []) x))))
     (transient {}) coll)))
+
+
 
 
 ;;do not construct this directly, use cat
