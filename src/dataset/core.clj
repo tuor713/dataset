@@ -12,53 +12,9 @@
          (defsource accounts ... definition ...)
 
          "Functional usage"
-         (-> accounts
-             (select* :Mnemonic :Strategy :StrategyDescription)
-
-             ;; note that this the very opposite of the design for select where 
-             ;; we use a Clojure function, here we use syntactic clauses that need to be compiled to a clojure
-             ;; function first
-
-             ;; I have already tried this with the old linq namespace
-             ;; it quickly turns into a mess of parsing expressions ...
-             (where* [:equal :Mnemonic "CDSSOV"]
-                     [:in :Mnemonic #{"LBRUSS" "LBUKRAIN" "JPTURK"}])
-
-             ;; implementation of join depends on the data sources
-             ;; DSP4+Hadoop means in memory join
-             ;; however, optimization switches are necessary to determine whether we want to "push down"
-             ;; data from one source into a where clause of the next source
-             ;; for example here, given this is a left join we could get the accounts and use those in an 
-             ;; appropriate where clause of the risk datasource 
-             
-             (join risk [:Mnemonic :Mnemonic])
+         (-> (join risk [:Mnemonic :Mnemonic])
              (left-join risk [:Mnemonic :Mnemonic])
-
-             ;; join with implementation hints:
-             ;; join strategy could be 
-             ;; - load left data first then inject where clause into right source
-             ;; - load both in parallel and join in memory
-             ;; - load right first
-             ;; - ...
-             (join risk {:join-strategy :left-first} [:Mnemonic :Mnemonic])
-
-             ;; Mnemonic is ambiguous now ??
-             (select* :Mnemonic 
-                      :Strategy
-                      :StrategyDescription
-                      ;; should we hide implementation via an abstract method like field that hides 
-                      ;; the underlying storage (vector / hashmap / record / struct map) ?
-                      ['(* 10000 (get % :DV01)) :as :ScaledDV01])
-
-             ;; * usage to just add to the records
-             (select* ::*
-                      ['(* 10000 (get % :DV01)) :as :ScaledDV01]))
-
-         ;; finally do something like (into []) to actually "run" the computation and get results. This should be 
-         ;; delayed as long as humanly possible to exploit efficiencies of delayed computation.
-
-         "Macro usage"
-         tbd)
+             ))
 
 ;; Foundational protocols
 
@@ -95,7 +51,7 @@
   (-where [self conditions]))
 
 (defprotocol Joinable
-  (-join [self join-fields]))
+  (-join [self hints join-fields]))
 
 ;; 2. Functional API
 
@@ -145,7 +101,6 @@
 
 ;; 1. Macro API
 
-
 (defmacro quote-with-code [sexp]
   (if (instance? clojure.lang.IObj sexp)
     `(with-meta (quote ~sexp)
@@ -188,7 +143,7 @@
 
   (-operator? [self opname] (contains? #{"+" "-" "*" "/"
                                          "<" "<=" ">" ">=" "="
-                                         "in"}
+                                         "in" "or" "and"}
                                        opname))
 
   (-function? [self fname] (contains? functions fname)))
@@ -274,7 +229,11 @@ Instead all further operation are simply proxied on the Clojure source."
        " from " 
        (if (not (s/blank? (:query attrs)))
          (str "(" (:query attrs) ")")
-         (:table attrs))))
+         (:table attrs))
+
+       (when (seq (:filters attrs))
+         (str " where "
+              (s/join " and " (:filters attrs))))))
 
 (defn- to-sql-value [spec]
   (if (keyword? spec)
@@ -299,7 +258,14 @@ Instead all further operation are simply proxied on the Clojure source."
 
   Selectable
   (-select [self fields]
-    (SQLDataSet. spec (assoc attrs :fields (into {} fields))))
+    (SQLDataSet. spec 
+                 (if (contains? attrs :fields)
+                   {:query (to-query attrs) :fields (into {} fields)}
+                   (assoc attrs :fields (into {} fields)))))
+
+  Filterable
+  (-where [self conditions]
+    (SQLDataSet. spec (update-in attrs [:filters] #(into (or % []) conditions))))
 
   p/CollReduce
   (coll-reduce 

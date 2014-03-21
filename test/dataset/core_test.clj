@@ -88,7 +88,11 @@
         hierarchy (sql-table->dataset h2-spec "hierarchy")
         accsov (sql-query->dataset h2-spec "select * from accounts where mnemonic = 'ACCSOV'")]
     
+    ;; blanko select
+
     (is (= 3 (r/count accounts)))
+
+    ;; selects
 
     (is (= #{{:mnemonic "ACCSOV"} {:mnemonic "ACCRUS"} {:mnemonic "ACCAFR"}}
            (r/into #{} (select accounts :$mnemonic))))
@@ -102,6 +106,35 @@
     (is (= [{:mnem "ACCSOV"}]
            (r/into [] (select accsov [:$mnemonic :as :mnem]))))
 
+    (is (= #{{:mnem "ACCSOV"} {:mnem "ACCRUS"} {:mnem "ACCAFR"}}
+           (r/into #{} 
+                   (-> accounts 
+                       (select [:$mnemonic :as :mnem] :$strategy)
+                       (select :$mnem)))))
+
+    ;; filters
+
+    (let [dataset (where accounts (= :$strategy "001"))]
+      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (= ["ACCSOV"]
+             (r/into [] (r/map :mnemonic dataset)))))
+
+    (let [dataset (where accounts (or (= :$strategy "001") (= :$strategy "002")))]
+      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+             (r/into #{} (r/map :mnemonic dataset)))))
+
+    (let [dataset (where accounts (in :$strategy #{"001" "002"}))]
+      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+             (r/into #{} (r/map :mnemonic dataset)))))
+
+    (let [dataset (where (where accounts (= :$strategy "002"))
+                         (= :$strategydescription "Africa"))]
+      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (= ["ACCAFR"]
+             (r/into [] (r/map :mnemonic dataset)))))
+    
 
     ;; Non-SQL interactions
     (is (= #{"SOV" "RUS" "AFR"}
