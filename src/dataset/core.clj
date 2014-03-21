@@ -7,26 +7,13 @@
         [clojure.walk :only [postwalk]]))
 
 
-(comment "Likely API usage"
-
-         (join ds ds2
-               {:join-type :left}
-               [field1 field2])
-
-
-         (-> (join risk [:Mnemonic :Mnemonic])
-             (left-join risk [:Mnemonic :Mnemonic])
-             ))
-
-;; Foundational protocols
-
 ;; Let's separate:
 ;; 1. Macro API
 ;; 2. Functional API for data sources (Clojure methods handling the all around implementation)
 ;; 3. Protocols used by functional API 
 ;; 4. Implementations of these protocols for various actual sources
 
-(declare ->clojure-dataset)
+(declare ->clojure-dataset cache lazy-cache)
 
 ;; 3. Data source protocols
 
@@ -105,7 +92,7 @@
   [left right 
    options
    & fields]
-  (let [params (merge {:join-type :left :join-flow :auto} options)
+  (let [params (merge {:join-type :inner :join-flow :auto} options)
         join-type (:join-type params)
         join-flow (:join-flow params)]
     (when (= #{:left :right} (set [join-type join-flow]))
@@ -113,21 +100,9 @@
               (str "Illegal combination of join-type " join-type " and join-flow " join-flow))))
     
     (let [sanitized-fields (map #(if (sequential? %) % [% %]) fields)]
-      (cond
-       ;; standardize right joins to left joins to reduce duplicate implementation further down
-       (= :right join-type)
-       (apply join* 
-              right left 
-              (assoc params
-                :join-type (get {:left :right :right :left} join-type join-type)
-                :join-flow (get {:left :right :right :left} join-type join-type))
-              (map #(-> [(second %) (first %)]) sanitized-fields))
-
-       (satisfies? Joinable left)
-       (-join left right params sanitized-fields)
-
-       :else
-       (apply join* (->clojure-dataset left) right params sanitized-fields)))))
+      (if (satisfies? Joinable left)
+        (-join left right params sanitized-fields)
+        (apply join* (->clojure-dataset left) right params sanitized-fields)))))
 
 ;; 1. Macro API
 
@@ -235,22 +210,29 @@
   Joinable
   (-join [self other options fields]
     (ClojureDataSet.
-     (lazy-seq
-      (let [lhskey (apply juxt (map (comp field->keyword first) fields))
-            rhskey (apply juxt (map (comp field->keyword second) fields))
+     (if (= (:join-type options) :cross)
+       ;; no caching here so that we make no assumptions on whether any of these
+       ;; datasets will fit into memory, users can pre-cache both datasets before
+       ;; passing them in the join if desired
+       (r/mapcat (fn [rec] (r/into [] (r/map #(merge rec %) other))) self)
+       
+       (lazy-seq
+        (let [lhskey (apply juxt (map (comp field->keyword first) fields))
+              rhskey (apply juxt (map (comp field->keyword second) fields))
 
-            lhs-groups (r/group-by lhskey self)
-            rhs-groups (r/group-by rhskey other)
+              lhs-groups (r/group-by lhskey self)
+              rhs-groups (r/group-by rhskey other)
 
-            result-keys
-            (case (:join-type options)
-              :left (keys lhs-groups)
-              :inner (intersection (set (keys lhs-groups)) (set (keys rhs-groups)))
-              :outer (union (set (keys lhs-groups)) (set (keys rhs-groups))))]
-        (for [k result-keys
-              l (lhs-groups k)
-              r (rhs-groups k)]
-          (merge l r))))))
+              result-keys
+              (case (:join-type options)
+                :left (keys lhs-groups)
+                :right (keys rhs-groups)
+                :inner (intersection (set (keys lhs-groups)) (set (keys rhs-groups)))
+                :outer (union (set (keys lhs-groups)) (set (keys rhs-groups))))]
+          (for [k result-keys
+                l (get lhs-groups k [{}])
+                r (get rhs-groups k [{}])]
+            (merge l r)))))))
 
   p/CollReduce
   (coll-reduce [_ f]
@@ -263,6 +245,12 @@
 Instead all further operation are simply proxied on the Clojure source."
   [source]
   (ClojureDataSet. source))
+
+(defn lazy-cache [dataset]
+  (->clojure-dataset (lazy-seq (r/into [] dataset))))
+
+(defn cache [dataset]
+  (->clojure-dataset (r/into [] dataset)))
 
 
 ;; Misc utilities
@@ -277,8 +265,7 @@ Instead all further operation are simply proxied on the Clojure source."
              rec)))
     dataset)))
 
-(defn cache [dataset]
-  (->clojure-dataset (r/into [] dataset)))
+
 
 
 

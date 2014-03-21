@@ -27,12 +27,16 @@
     ;; Rollups
     (sql/execute! db-con ["drop table hierarchy if exists"])
     (sql/execute! db-con ["create table hierarchy (strategy varchar, business varchar, subbusiness varchar)"])
-    (sql/insert! db-con :hierarchy {:strategy "002" 
-                                    :business "EM Credit Trading" 
-                                    :subbusiness "CEEMEA Credit Trading"})
     (sql/insert! db-con :hierarchy {:strategy "001" 
                                     :business "Flow Credit Trading" 
                                     :subbusiness "EMEA Flow Credit Trading"})
+    (sql/insert! db-con :hierarchy {:strategy "002" 
+                                    :business "EM Credit Trading" 
+                                    :subbusiness "CEEMEA Credit Trading"})
+    (sql/insert! db-con :hierarchy {:strategy "003" 
+                                    :business "Structured Credit Trading" 
+                                    :subbusiness "CDO Trading"})
+
 
     ;; Risk
     (sql/execute! db-con ["drop table risk if exists"])
@@ -140,6 +144,18 @@
       (is (= ["ACCAFR"]
              (r/into [] (r/map :mnemonic dataset)))))
 
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
+             [nil "Structured Credit Trading"]}
+           (r/into #{} (r/map (juxt :mnemonic :business) 
+                              (join hierarchy accounts {:join-type :left} :$strategy)))))
+
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
+             [nil "Structured Credit Trading"]}
+           (r/into #{} (r/map (juxt :mnemonic :business) 
+                              (join accounts hierarchy {:join-type :right} :$strategy)))))
+
+
+    ;; comment no outer join support for shit
 
     ;; joins
 
@@ -151,6 +167,10 @@
     ;; Non-SQL interactions
     (is (= #{"SOV" "RUS" "AFR"}
            (r/into #{} (r/map :mnem (select accounts [(subs :$mnemonic 3) :as :mnem])))))
+
+    (let [joindata (join accounts (cache hierarchy) {} :$strategy)]
+      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
+             (r/into #{} (r/map (juxt :mnemonic :business) joindata)))))
 
     ))
 
@@ -167,7 +187,27 @@
 (deftest test-clojure-joins
   (let [accounts (cache (sql-table->dataset h2-spec "accounts"))
         hierarchy (cache (sql-table->dataset h2-spec "hierarchy"))]
+
     (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
          (r/into #{} (r/map (juxt :mnemonic :business) 
                             (join accounts hierarchy {} :$strategy)))))
+
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
+             [nil "Structured Credit Trading"]}
+           (r/into #{} (r/map (juxt :mnemonic :business) 
+                              (join hierarchy accounts {:join-type :left} :$strategy)))))
+
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
+             [nil "Structured Credit Trading"]}
+           (r/into #{} (r/map (juxt :mnemonic :business) 
+                              (join accounts hierarchy {:join-type :right} :$strategy)))))
+
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
+             [nil "Structured Credit Trading"]}
+           (r/into #{} (r/map (juxt :mnemonic :business) 
+                              (join accounts hierarchy {:join-type :outer} :$strategy)))))
+
+    (is (= 9 (r/count (join accounts hierarchy {:join-type :cross}))))
+
+
     ))
