@@ -2,16 +2,18 @@
   "Dataset library built on top of (backported) reducers library."
   (:require [backport.clojure.core.reducers :as r]
             [backport.clojure.core.protocols :as p]
-            [clojure.java.jdbc :as sql]
             [clojure.string :as s])
-  (:use [clojure.set :only [union intersection rename-keys]]
+  (:use [clojure.set :only [union intersection difference rename-keys]]
         [clojure.walk :only [postwalk]]))
 
 
 (comment "Likely API usage"
-         (defsource accounts ... definition ...)
 
-         "Functional usage"
+         (join ds ds2
+               {:join-type :left}
+               [field1 field2])
+
+
          (-> (join risk [:Mnemonic :Mnemonic])
              (left-join risk [:Mnemonic :Mnemonic])
              ))
@@ -26,7 +28,6 @@
 
 (declare ->clojure-dataset)
 
-
 ;; 3. Data source protocols
 
 (defprotocol SexpQueryTransformer
@@ -35,9 +36,6 @@
   (-operator? [self opname])
   (-function? [self fname]))
 
-;; Usually should be implemented by delegating to an appropriate SexpQuery object
-;; So a data source would implement Queryable and then construct such an object via the 
-;; use of the default parser against a custom SexpQueryTransformer
 (defprotocol Queryable 
   (-parse-sexp [self sexp]))
 
@@ -51,7 +49,7 @@
   (-where [self conditions]))
 
 (defprotocol Joinable
-  (-join [self hints join-fields]))
+  (-join [self other hints join-fields]))
 
 ;; 2. Functional API
 
@@ -64,10 +62,13 @@
     (subs (name kw) 1) 
     (name kw)))
 
+(defn field->keyword [kv]
+  (keyword (field->field-name kv)))
+
 (defn select* [source & fields]
   (if (satisfies? Selectable source)
     (let [converted (map (fn [[exp _ label]] [exp (-parse-sexp source exp) label]) 
-                         (map (fn [f] (if (keyword? f) [f :as (keyword (field->field-name f))] f)) fields))
+                         (map (fn [f] (if (keyword? f) [f :as (field->keyword f)] f)) fields))
           handled-fields (map (juxt #(nth % 2) second)
                               (remove #(= (second %) ::invalid) converted))
           unhandled-fields (map (juxt first (constantly :as) #(nth % 2)) 
@@ -97,13 +98,50 @@
         with-handled))
     (apply where* (->clojure-dataset source) conditions)))
 
+(defn join* 
+  "Supported options:
+- join-type: :left, :right, :inner (default), :outer
+- join-flow: :left, :right, :none, :auto (default). Note combinations like join-type=left, join-flow=right are invalid."
+  [left right 
+   options
+   & fields]
+  (let [params (merge {:join-type :left :join-flow :auto} options)
+        join-type (:join-type params)
+        join-flow (:join-flow params)]
+    (when (= #{:left :right} (set [join-type join-flow]))
+      (throw (IllegalArgumentException. 
+              (str "Illegal combination of join-type " join-type " and join-flow " join-flow))))
+    
+    (let [sanitized-fields (map #(if (sequential? %) % [% %]) fields)]
+      (cond
+       ;; standardize right joins to left joins to reduce duplicate implementation further down
+       (= :right join-type)
+       (apply join* 
+              right left 
+              (assoc params
+                :join-type (get {:left :right :right :left} join-type join-type)
+                :join-flow (get {:left :right :right :left} join-type join-type))
+              (map #(-> [(second %) (first %)]) sanitized-fields))
 
+       (satisfies? Joinable left)
+       (-join left right params sanitized-fields)
+
+       :else
+       (apply join* (->clojure-dataset left) right params sanitized-fields)))))
 
 ;; 1. Macro API
 
+(defn- function-quote [sexp]
+  (postwalk
+   (fn [exp]
+     (if (list? exp)
+       `(list (quote ~(first exp)) ~@(rest exp))
+       exp))
+   sexp))
+
 (defmacro quote-with-code [sexp]
   (if (instance? clojure.lang.IObj sexp)
-    `(with-meta (quote ~sexp)
+    `(with-meta ~(function-quote sexp)
        {:function ~(let [s (gensym)]
                      (list
                       'fn
@@ -111,7 +149,7 @@
                       (postwalk 
                        (fn [exp]
                          (if (field-ref? exp)
-                           (list (keyword (field->field-name exp)) s)
+                           (list (field->keyword exp) s)
                            exp))
                        sexp)))})
     sexp))
@@ -127,26 +165,14 @@
 (defmacro where [source & conditions]
   `(where* ~source ~@(map #(list 'quote-with-code %) conditions)))
 
+
+(defmacro join [left right options & fields]
+  `(join* ~left ~right ~options ~@fields))
+
+
 ;; 4. Implementation - Query parsing
 
 (def invalid ::invalid)
-
-(deftype SQLQueryTransformer [functions]
-  SexpQueryTransformer
-  (-to-value [self primitive] 
-    (cond
-     (nil? primitive) "null"
-     (string? primitive) (str "'" primitive "'")
-     :else (str primitive)))
-
-  (-to-field [self field-name] field-name)
-
-  (-operator? [self opname] (contains? #{"+" "-" "*" "/"
-                                         "<" "<=" ">" ">=" "="
-                                         "in" "or" "and"}
-                                       opname))
-
-  (-function? [self fname] (contains? functions fname)))
 
 (deftype ApplicativeQueryable [transformer]
   Queryable
@@ -203,8 +229,28 @@
   (-parse-sexp [self sexp]
     (or (:function (meta sexp)) 
         (if (field-ref? sexp) 
-          (keyword (field->field-name sexp))
+          (field->keyword sexp)
           sexp)))
+
+  Joinable
+  (-join [self other options fields]
+    (ClojureDataSet.
+     (lazy-seq
+      (let [lhskey (apply juxt (map (comp field->keyword first) fields))
+            rhskey (apply juxt (map (comp field->keyword second) fields))
+
+            lhs-groups (r/group-by lhskey self)
+            rhs-groups (r/group-by rhskey other)
+
+            result-keys
+            (case (:join-type options)
+              :left (keys lhs-groups)
+              :inner (intersection (set (keys lhs-groups)) (set (keys rhs-groups)))
+              :outer (union (set (keys lhs-groups)) (set (keys rhs-groups))))]
+        (for [k result-keys
+              l (lhs-groups k)
+              r (rhs-groups k)]
+          (merge l r))))))
 
   p/CollReduce
   (coll-reduce [_ f]
@@ -219,112 +265,20 @@ Instead all further operation are simply proxied on the Clojure source."
   (ClojureDataSet. source))
 
 
-;; 4. Implementation - SQL database
+;; Misc utilities
 
-(defn- to-query [attrs]
-  (str "select " (if (seq (:fields attrs))
-                   (s/join "," (map (fn [[label selector]] (str selector " as " (name label))) 
-                                    (:fields attrs)))
-                   "*")
-       " from " 
-       (if (not (s/blank? (:query attrs)))
-         (str "(" (:query attrs) ")")
-         (:table attrs))
-
-       (when (seq (:filters attrs))
-         (str " where "
-              (s/join " and " (:filters attrs))))))
-
-(defn- to-sql-value [spec]
-  (if (keyword? spec)
-    (name spec)
-    nil))
-
-(defprotocol SQLAttributes
-  (db-spec [self])
-  (db-attrs [self]))
-
-(deftype SQLDataSet [spec attrs]
-  clojure.lang.Seqable
-  (seq [self] (seq (r/into [] self)))
-
-  SQLAttributes
-  (db-spec [_] spec)
-  (db-attrs [_] attrs)
-
-  Queryable
-  (-parse-sexp [self sexp]
-    (-parse-sexp (ApplicativeQueryable. (SQLQueryTransformer. #{"concat"})) sexp))
-
-  Selectable
-  (-select [self fields]
-    (SQLDataSet. spec 
-                 (if (contains? attrs :fields)
-                   {:query (to-query attrs) :fields (into {} fields)}
-                   (assoc attrs :fields (into {} fields)))))
-
-  Filterable
-  (-where [self conditions]
-    (SQLDataSet. spec (update-in attrs [:filters] #(into (or % []) conditions))))
-
-  p/CollReduce
-  (coll-reduce 
-    [_ f]
-    (sql/with-db-connection [con spec]
-      (let [q (to-query attrs)]
-        (println "Executing query:" q)
-        (sql/db-query-with-resultset con [q]
-          (fn [res] (r/reduce f (resultset-seq res)))))))
-  (coll-reduce 
-    [_ f val]
-    (sql/with-db-connection [con spec]
-      (let [q (to-query attrs)]
-        (println "Executing query:" q)
-        (sql/db-query-with-resultset con [q]
-          (fn [res] (r/reduce f val (resultset-seq res))))))))
-
-(defn sql-table->dataset
-  [db-spec table]
-  (SQLDataSet. db-spec {:table table}))
-
-(defn sql-query->dataset
-  [db-spec query]
-  (SQLDataSet. db-spec {:query query}))
-
-
-
-
-
-;; TODO:
-;; - this is actually quite interesting in that if we go down to the reducers API we loose potential
-;;   optimizations of joins
 (defn label [dataset namespace]
-  ;; TODO optimize for schematic datasets
-  (r/map 
-   (fn [rec]
-     (into {}
-           (map 
-            (fn [e] [(keyword (name namespace) (name (key e))) (val e)])
-            rec)))
-   dataset))
+  (->clojure-dataset
+   (r/map 
+    (fn [rec]
+      (into {}
+            (map 
+             (fn [e] [(keyword (name namespace) (name (key e))) (val e)])
+             rec)))
+    dataset)))
 
 (defn cache [dataset]
-  (r/into [] dataset))
+  (->clojure-dataset (r/into [] dataset)))
 
 
-;; Additional protocols
-
-(defn join [lhs rhs lhskey rhskey join-type]
-  (let [lhs-groups (r/group-by lhskey lhs)
-        rhs-groups (r/group-by rhskey rhs)
-        result-keys (join-type (set (keys lhs-groups)) (set (keys rhs-groups)))]
-    (for [k result-keys
-          l (lhs-groups k)
-          r (rhs-groups k)]
-      (merge l r))))
-
-(def inner-join #(join %1 %2 %3 %4 intersection))
-(def outer-join #(join %1 %2 %3 %4 union))
-(def left-join #(join %1 %2 %3 %3 (fn [l _] l)))
-(def right-join #(left-join %2 %1 %4 %3))
 

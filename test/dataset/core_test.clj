@@ -2,7 +2,8 @@
   (:require [clojure.java.jdbc :as sql]
             [backport.clojure.core.reducers :as r])
   (:use clojure.test
-        dataset.core))
+        dataset.core
+        dataset.sql))
 
 
 ;; DB fixture
@@ -45,8 +46,6 @@
   (sql/with-db-connection [db-con db-spec]
     (sql/query db-con [sql])))
 
-#_(query "select a.* from accounts a join hierarchy h where h.strategy = a.strategy and h.business = 'EM Credit Trading'")
-
 (use-fixtures :once 
   (fn [f] 
     (bootstrap-db)
@@ -54,7 +53,7 @@
 
 (deftest test-sql-query-conversion
   (let [sut (dataset.core.ApplicativeQueryable. 
-             (dataset.core.SQLQueryTransformer. #{"concat"}))]
+             (dataset.sql.SQLQueryTransformer. #{"concat"}))]
     ;; primitives
     (is (= "1" (-parse-sexp sut '1)))
     (is (= "null" (-parse-sexp sut nil)))
@@ -115,26 +114,39 @@
     ;; filters
 
     (let [dataset (where accounts (= :$strategy "001"))]
-      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (instance? dataset.sql.SQLDataSet dataset))
       (is (= ["ACCSOV"]
              (r/into [] (r/map :mnemonic dataset)))))
 
     (let [dataset (where accounts (or (= :$strategy "001") (= :$strategy "002")))]
-      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (instance? dataset.sql.SQLDataSet dataset))
       (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
              (r/into #{} (r/map :mnemonic dataset)))))
 
     (let [dataset (where accounts (in :$strategy #{"001" "002"}))]
-      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (instance? dataset.sql.SQLDataSet dataset))
+      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+             (r/into #{} (r/map :mnemonic dataset)))))
+
+    (let [strategy-set #{"001" "002"}
+          dataset (where accounts (in :$strategy strategy-set))]
+      (is (instance? dataset.sql.SQLDataSet dataset))
       (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
              (r/into #{} (r/map :mnemonic dataset)))))
 
     (let [dataset (where (where accounts (= :$strategy "002"))
                          (= :$strategydescription "Africa"))]
-      (is (instance? dataset.core.SQLDataSet dataset))
+      (is (instance? dataset.sql.SQLDataSet dataset))
       (is (= ["ACCAFR"]
              (r/into [] (r/map :mnemonic dataset)))))
-    
+
+
+    ;; joins
+
+    (let [joindata (join accounts hierarchy {} :$strategy)]
+      (is (instance? dataset.sql.SQLDataSet joindata))
+      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
+             (r/into #{} (r/map (juxt :mnemonic :business) joindata)))))
 
     ;; Non-SQL interactions
     (is (= #{"SOV" "RUS" "AFR"}
@@ -150,5 +162,12 @@
            (r/into #{} (select data [(subs :$mnemonic 3) :as :mnem]))))
 
     (is (= ["ACCSOV"]
-           (r/into [] (r/map :mnemonic (where data (.contains :$mnemonic "SOV")))))))
-  )
+           (r/into [] (r/map :mnemonic (where data (.contains :$mnemonic "SOV"))))))))
+
+(deftest test-clojure-joins
+  (let [accounts (cache (sql-table->dataset h2-spec "accounts"))
+        hierarchy (cache (sql-table->dataset h2-spec "hierarchy"))]
+    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
+         (r/into #{} (r/map (juxt :mnemonic :business) 
+                            (join accounts hierarchy {} :$strategy)))))
+    ))
