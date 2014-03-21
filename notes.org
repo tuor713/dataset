@@ -1,0 +1,123 @@
+* Dataset Library
+** Purpose
+- Simplify cross-datasource data manipulation by consistent select, group, join syntax
+- Allow performance optimizations to run as close to native datasource speep
+** Challenges
+- Cross-datasource joins are inefficient (result need to be loaded in
+  memory on the client, join performance can be hard to steer).
+- APIs of various data sources are not necessarily in line, so
+  behaviour is likely to be constrained by minimal support guarantees.
+
+
+** Primary goals
+*** Uniform data source access
+*** Efficient as possible joins, with minimal hinting
+As a corollary operations on data sources should - *whereever
+possible* - be handled internally to a data source.
+*** Exploit clojure.core.reducers style monad-like computation
+In particular handle closeable data sources like DBs in a transparent
+way that deals in terms of data access and joins rather than
+deliberate open close operations.
+
+
+** Design questions
+*** Is it better to have schemas for data access or be schema less?
+Data with schema is likely more efficient as regards in memory
+representation, and in addition we can validate queries upfront to a
+much greater degree, thus improving safety.
+
+We could make schemas an opt in ... so for efficient access and
+better operation data sources may have a schema but need not have
+one. I don't think we want to enforce data types though ??
+
+
+*** Should "select *" type queries be supported? 
+The argument in favour is that it reduces maintenance overhead for
+adding new fields. Instead they will just flow through. 
+
+The counterargument to that lies in the fact that adding fields in a
+non-namespaced environment is susceptible to introducing name
+clashes and could hence actually introduce subtle breaks in existing
+code. However, it is not clear to me whether thorough testing of all
+client code affected by field additions would in practice be
+feasible. So there is a chance forbidding the use of "select *"
+queries would not reduce regression while at the same time introducing
+extra overheads.
+
+One extra argument for forbearance is that individual data sources
+may expose poorly thought out, and data source specific fields and
+data source specific field names. It is likely better to enforce
+standardization as part of accepting fields into the canonical set of
+datasources.
+
+
+*** Should fields be namespace prefixed?
+It would be very cool and potentially help avoid errors if all fields
+were by necessity namespace prefixed. However, there is a strained
+relationship of this goal with the goal of using efficient data
+source internal joins (especially in the presence of * operators)
+because these queries may not easily or efficiently allow the fields
+to be prefixed.
+
+
+*** How to handle joins between disparate data sources efficiently?
+The crux of the whole question is whether joins between different
+datasources can ever be handled with acceptable performance,
+especially if we assume no sufficient metadata or indices are
+available to allow fast joins. Making matters worse is the fact that
+in memory joins of data are by necessity constrained (and worse,
+appropriate safeguards may again be tricky to get right).
+
+
+*** How leaky can / must the API be?
+Rails active records are by necessity leaky. In the same way we may
+have to accept a certain amount of leakiness because individual data
+sources vary significantly in performance characteristics and even
+simple use cases may require performance optimizations in many places.
+
+
+*** Shall we work on symbolic LINQ representation or Clojure functions?
+Symbolic representation has the advantage that it can easily be
+translated into data source specific representation (i.e. run inside
+the SQL query). However, the translation can be quite complicated. 
+Also it is often less clear what would be going on. The alternative
+is to use Clojure functions by default (maybe attach code for
+die-hard optimizers).
+
+
+** Implementation steps
+1. Design API
+2. Define internal protocols, single focus protocols rather than
+   bigger is better incohesive collections of methods. Need to support
+   - Select and manipulation
+   - Joins
+   - Group by
+   - Sort
+   - Limit, ideally also paging / iteration with bounds
+3. Defer design decisions that are not clear yet
+   Not all pluggability is needed, not all future extension points may
+   work out. But at the minimum this should mean to clearly factor
+   responsibilities and define appropriate interface / protocol
+   points to separate concerns.
+
+** Design notes
+*** Define function before macros 
+Functions are more composeable and vastly more useful for
+extensibility. Macros on the other hand serve as the final veneer,
+like VAT they should only be applied in the final instance of usage. 
+
+** Side notes
+*** Protocol hierarchies don't work well with extend
+For an individual protocol one can use extend-type to graft it onto
+existing types. However, this does not work when then defining a
+second protocol that is implemented in terms of the first
+protocol. Transitive extend relationships don't seem to be respected.
+
+See for example PersistentVector extended to satisfy
+CollReduce. However, Selectable implemneted on CollReduce does not
+work for PersistentVector.
+
+** Outstanding design questions
+1. Is there a better way to distinguish fields than :$field?
+2. How to make the functional API still usable with quoted code?
+3. Where to split the select clause syntactic sugar?

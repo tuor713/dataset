@@ -11,3 +11,5 @@ pom.xml.asc
 .lein-failures
 .lein-plugins
 .lein-repl-history
+test.h2.db
+test.trace.db
