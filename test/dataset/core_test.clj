@@ -71,6 +71,8 @@
     (is (= "(1 + 2 + 3)" (-parse-sexp sut '(+ 1 2 3))))
     (is (= "(name in ('john','jack'))"
            (-parse-sexp sut '(in :$name ["john" "jack"]))))
+    (is (= "(code in (1,2,3))"
+           (-parse-sexp sut '(in :$code [1 2 3]))))
 
 
     ;; functions
@@ -82,132 +84,151 @@
     
     ;; combinations
     (is (= "(greeting = concat('hello','world'))"
-           (-parse-sexp sut '(= :$greeting (concat "hello" "world")))))
-    ))
+           (-parse-sexp sut '(= :$greeting (concat "hello" "world")))))))
 
+
+(defn to-vec [ds] (r/into [] ds))
+(defn to-set [ds] (r/into #{} ds))
 
 (deftest test-sql-datasource
   (let [accounts (sql-table->dataset h2-spec "accounts")
         hierarchy (sql-table->dataset h2-spec "hierarchy")
-        accsov (sql-query->dataset h2-spec "select * from accounts where mnemonic = 'ACCSOV'")]
-    
-    ;; blanko select
+        accsov (sql-query->dataset h2-spec "select * from accounts where mnemonic = 'ACCSOV'")
+        last-query (atom nil)
+        prev dataset.sql/with-query-results]
+    (binding [dataset.sql/with-query-results
+              (fn [con q f] 
+                (reset! last-query q)
+                (println "Executing query:" q)
+                (prev con q f))]
+      
+      ;; blanko select
 
-    (is (= 3 (r/count accounts)))
+      (is (= 3 (r/count accounts)))
+      (is (= @last-query "select * from accounts"))
 
-    ;; selects
+      ;; selects
 
-    (is (= #{{:mnemonic "ACCSOV"} {:mnemonic "ACCRUS"} {:mnemonic "ACCAFR"}}
-           (r/into #{} (select accounts :$mnemonic))))
-    
-    (is (= #{"ACCSOV" "ACCRUS" "ACCAFR"}
-           (r/into #{} (r/map :mnem (select accounts [:$mnemonic :as :mnem])))))
+      (is (= #{{:mnemonic "ACCSOV"} {:mnemonic "ACCRUS"} {:mnemonic "ACCAFR"}}
+             (to-set (select accounts :$mnemonic))))
+      
+      (is (= #{"ACCSOV" "ACCRUS" "ACCAFR"}
+             (to-set (r/map :mnem (select accounts [:$mnemonic :as :mnem])))))
 
-    (is (= [{:mnemonic "ACCSOV" :strategy "001" :strategydescription "Sovereigns"}]
-           (r/into [] accsov)))
+      (is (= [{:mnemonic "ACCSOV" :strategy "001" :strategydescription "Sovereigns"}]
+             (to-vec accsov)))
 
-    (is (= [{:mnem "ACCSOV"}]
-           (r/into [] (select accsov [:$mnemonic :as :mnem]))))
+      (is (= [{:mnem "ACCSOV"}]
+             (to-vec (select accsov [:$mnemonic :as :mnem]))))
 
-    (is (= #{{:mnem "ACCSOV"} {:mnem "ACCRUS"} {:mnem "ACCAFR"}}
-           (r/into #{} 
-                   (-> accounts 
-                       (select [:$mnemonic :as :mnem] :$strategy)
-                       (select :$mnem)))))
+      (is (= #{{:mnem "ACCSOV"} {:mnem "ACCRUS"} {:mnem "ACCAFR"}}
+             (-> accounts 
+                 (select [:$mnemonic :as :mnem] :$strategy)
+                 (select :$mnem)
+                 (to-set))))
 
-    ;; filters
+      ;; filters
 
-    (let [dataset (where accounts (= :$strategy "001"))]
-      (is (instance? dataset.sql.SQLDataSet dataset))
-      (is (= ["ACCSOV"]
-             (r/into [] (r/map :mnemonic dataset)))))
+      (let [dataset (where accounts (= :$strategy "001"))]
+        (is (instance? dataset.sql.SQLDataSet dataset))
+        (is (= ["ACCSOV"]
+               (to-vec (r/map :mnemonic dataset)))))
 
-    (let [dataset (where accounts (or (= :$strategy "001") (= :$strategy "002")))]
-      (is (instance? dataset.sql.SQLDataSet dataset))
-      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
-             (r/into #{} (r/map :mnemonic dataset)))))
+      (let [dataset (where accounts (or (= :$strategy "001") (= :$strategy "002")))]
+        (is (instance? dataset.sql.SQLDataSet dataset))
+        (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+               (to-set (r/map :mnemonic dataset)))))
 
-    (let [dataset (where accounts (in :$strategy #{"001" "002"}))]
-      (is (instance? dataset.sql.SQLDataSet dataset))
-      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
-             (r/into #{} (r/map :mnemonic dataset)))))
+      (let [dataset (where accounts (in :$strategy #{"001" "002"}))]
+        (is (instance? dataset.sql.SQLDataSet dataset))
+        (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+               (to-set (r/map :mnemonic dataset)))))
 
-    (let [strategy-set #{"001" "002"}
-          dataset (where accounts (in :$strategy strategy-set))]
-      (is (instance? dataset.sql.SQLDataSet dataset))
-      (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
-             (r/into #{} (r/map :mnemonic dataset)))))
+      (let [strategy-set #{"001" "002"}
+            dataset (where accounts (in :$strategy strategy-set))]
+        (is (instance? dataset.sql.SQLDataSet dataset))
+        (is (= #{"ACCSOV" "ACCAFR" "ACCRUS"}
+               (to-set (r/map :mnemonic dataset)))))
 
-    (let [dataset (where (where accounts (= :$strategy "002"))
-                         (= :$strategydescription "Africa"))]
-      (is (instance? dataset.sql.SQLDataSet dataset))
-      (is (= ["ACCAFR"]
-             (r/into [] (r/map :mnemonic dataset)))))
+      (let [dataset (where (where accounts (= :$strategy "002"))
+                           (= :$strategydescription "Africa"))]
+        (is (instance? dataset.sql.SQLDataSet dataset))
+        (is (= ["ACCAFR"]
+               (to-vec (r/map :mnemonic dataset)))))
 
-    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
-             [nil "Structured Credit Trading"]}
-           (r/into #{} (r/map (juxt :mnemonic :business) 
-                              (join hierarchy accounts {:join-type :left} :$strategy)))))
+      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] 
+               ["ACCAFR" "EM Credit Trading"] [nil "Structured Credit Trading"]}
+             (to-set (r/map (juxt :mnemonic :business) 
+                                (join hierarchy accounts {:join-type :left} :$strategy)))))
 
-    (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
-             [nil "Structured Credit Trading"]}
-           (r/into #{} (r/map (juxt :mnemonic :business) 
-                              (join accounts hierarchy {:join-type :right} :$strategy)))))
+      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] 
+               ["ACCAFR" "EM Credit Trading"] [nil "Structured Credit Trading"]}
+             (to-set (r/map (juxt :mnemonic :business) 
+                                (join accounts hierarchy {:join-type :right} :$strategy)))))
 
 
-    ;; comment no outer join support for shit
+      ;; comment no outer join support for shit
 
-    ;; joins
+      (is (= [{:mnemonic "ACCSOV" :strategy "001" :strategydescription "Sovereigns"}]
+             (r/into [] (join [{:strategy "001"}] accounts {:join-flow :left} :$strategy))))
+      (is (= @last-query "select * from accounts where (strategy in ('001'))"))
 
-    (let [joindata (join accounts hierarchy {} :$strategy)]
-      (is (instance? dataset.sql.SQLDataSet joindata))
-      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
-             (r/into #{} (r/map (juxt :mnemonic :business) joindata)))))
+      (is (= [{:mnemonic "ACCSOV" :strategy "001" :strategydescription "Sovereigns"}]
+             (r/into [] (join accounts [{:strategy "001"}] {:join-flow :right} :$strategy))))
+      (is (= @last-query "select * from accounts where (strategy in ('001'))"))
 
-    ;; Non-SQL interactions
-    (is (= #{"SOV" "RUS" "AFR"}
-           (r/into #{} (r/map :mnem (select accounts [(subs :$mnemonic 3) :as :mnem])))))
 
-    (let [joindata (join accounts (cache hierarchy) {} :$strategy)]
-      (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
-             (r/into #{} (r/map (juxt :mnemonic :business) joindata)))))
+      ;; joins
 
-    ))
+      (let [joindata (join accounts hierarchy {} :$strategy)]
+        (is (instance? dataset.sql.SQLDataSet joindata))
+        (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
+               (to-set (r/map (juxt :mnemonic :business) joindata)))))
+
+      ;; Non-SQL interactions
+      (is (= #{"SOV" "RUS" "AFR"}
+             (to-set (r/map :mnem (select accounts [(subs :$mnemonic 3) :as :mnem])))))
+
+      (let [joindata (join accounts (cache hierarchy) {} :$strategy)]
+        (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
+               (to-set (r/map (juxt :mnemonic :business) joindata))))))))
+
 
 (deftest test-clojure-datasource
   (let [data (->clojure-dataset [{:mnemonic "ACCSOV"}
                                  {:mnemonic "ACCRUS"}
                                  {:mnemonic "ACCAFR"}])]
     (is (= #{{:mnem "SOV"} {:mnem "RUS"} {:mnem "AFR"}}
-           (r/into #{} (select data [(subs :$mnemonic 3) :as :mnem]))))
+           (to-set (select data [(subs :$mnemonic 3) :as :mnem]))))
 
     (is (= ["ACCSOV"]
-           (r/into [] (r/map :mnemonic (where data (.contains :$mnemonic "SOV"))))))))
+           (to-vec (r/map :mnemonic (where data (.contains :$mnemonic "SOV"))))))))
+
 
 (deftest test-clojure-joins
   (let [accounts (cache (sql-table->dataset h2-spec "accounts"))
         hierarchy (cache (sql-table->dataset h2-spec "hierarchy"))]
 
     (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
-         (r/into #{} (r/map (juxt :mnemonic :business) 
+         (to-set (r/map (juxt :mnemonic :business) 
                             (join accounts hierarchy {} :$strategy)))))
 
     (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
              [nil "Structured Credit Trading"]}
-           (r/into #{} (r/map (juxt :mnemonic :business) 
+           (to-set (r/map (juxt :mnemonic :business) 
                               (join hierarchy accounts {:join-type :left} :$strategy)))))
 
     (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
              [nil "Structured Credit Trading"]}
-           (r/into #{} (r/map (juxt :mnemonic :business) 
+           (to-set (r/map (juxt :mnemonic :business) 
                               (join accounts hierarchy {:join-type :right} :$strategy)))))
 
     (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]
              [nil "Structured Credit Trading"]}
-           (r/into #{} (r/map (juxt :mnemonic :business) 
+           (to-set (r/map (juxt :mnemonic :business) 
                               (join accounts hierarchy {:join-type :outer} :$strategy)))))
 
     (is (= 9 (r/count (join accounts hierarchy {:join-type :cross}))))
 
-
-    ))
+    (is (= [{:a 1 :b 2 :c 3}]
+           (to-vec (join [{:a 1 :b 2}] [{:a 4 :b 2 :c 3}] {} :$b))))))

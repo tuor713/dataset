@@ -44,11 +44,14 @@
     (name spec)
     nil))
 
+;; partially a testing schim
+(defn ^:dynamic with-query-results [con q f]
+  (sql/db-query-with-resultset con [q] f))
+
+
 (defprotocol SQLAttributes
   (db-spec [self])
   (db-fragment [self]))
-
-
 
 (defprotocol SQLFragment
   (sql-query [self connection])
@@ -153,16 +156,12 @@
     [_ f]
     (sql/with-db-connection [con spec]
       (let [q (sql-query fragment (:connection con))]
-        (println "Executing query:" q)
-        (sql/db-query-with-resultset con [q]
-          (fn [res] (r/reduce f (resultset-seq res)))))))
+        (with-query-results con q (fn [res] (r/reduce f (resultset-seq res)))))))
   (coll-reduce 
     [_ f val]
     (sql/with-db-connection [con spec]
       (let [q (sql-query fragment (:connection con))]
-        (println "Executing query:" q)
-        (sql/db-query-with-resultset con [q]
-          (fn [res] (r/reduce f val (resultset-seq res))))))))
+        (with-query-results con q (fn [res] (r/reduce f val (resultset-seq res))))))))
 
 (defn sql-table->dataset
   [db-spec table]

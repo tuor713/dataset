@@ -15,6 +15,9 @@
 
 (declare ->clojure-dataset cache lazy-cache)
 
+(defn in [v values]
+  (contains? (set values) v))
+
 ;; 3. Data source protocols
 
 (defprotocol SexpQueryTransformer
@@ -40,6 +43,29 @@
 
 ;; 2. Functional API
 
+
+(defn- function-quote [sexp]
+  (postwalk
+   (fn [exp]
+     (if (list? exp)
+       `(list (quote ~(first exp)) ~@(rest exp))
+       exp))
+   sexp))
+
+(defmacro quote-with-code [sexp]
+  (if (instance? clojure.lang.IObj sexp)
+    `(with-meta ~(function-quote sexp)
+       {:function ~(let [s (gensym)]
+                     (list
+                      'fn
+                      [s]
+                      (postwalk 
+                       (fn [exp]
+                         (if (field-ref? exp)
+                           (list (field->keyword exp) s)
+                           exp))
+                       sexp)))})
+    sexp))
 
 (defn field-ref? [kw]
   (and (keyword? kw) (.startsWith (name kw) "$")))
@@ -85,6 +111,24 @@
         with-handled))
     (apply where* (->clojure-dataset source) conditions)))
 
+(declare join*)
+
+(defn- handle-join-flow [left right flow options fields]
+  (let [right? (= flow :right)
+        extractor (apply juxt (map (comp field->keyword (if right? second first)) fields))
+        combinations (r/reduce (fn [res rec]
+                                 (map conj res (extractor rec))) 
+                               (repeat (count fields) #{})
+                               (if right? right left))
+        
+        sink (apply where* (if right? left right)
+                    (map
+                     (fn [f selections] 
+                       (quote-with-code (in f selections)))
+                     (map (if right? first second) fields)
+                     combinations))]
+    (apply join* (if right? sink left) (if right? right sink) (assoc options :join-flow :none) fields)))
+
 (defn join* 
   "Supported options:
 - join-type: :left, :right, :inner (default), :outer
@@ -100,34 +144,14 @@
               (str "Illegal combination of join-type " join-type " and join-flow " join-flow))))
     
     (let [sanitized-fields (map #(if (sequential? %) % [% %]) fields)]
-      (if (satisfies? Joinable left)
-        (-join left right params sanitized-fields)
-        (apply join* (->clojure-dataset left) right params sanitized-fields)))))
+      (cond
+       (= join-flow :left) (handle-join-flow left right join-flow options sanitized-fields)
+       (= join-flow :right) (handle-join-flow left right join-flow options sanitized-fields)
+
+       (satisfies? Joinable left) (-join left right params sanitized-fields)
+       :else (apply join* (->clojure-dataset left) right params sanitized-fields)))))
 
 ;; 1. Macro API
-
-(defn- function-quote [sexp]
-  (postwalk
-   (fn [exp]
-     (if (list? exp)
-       `(list (quote ~(first exp)) ~@(rest exp))
-       exp))
-   sexp))
-
-(defmacro quote-with-code [sexp]
-  (if (instance? clojure.lang.IObj sexp)
-    `(with-meta ~(function-quote sexp)
-       {:function ~(let [s (gensym)]
-                     (list
-                      'fn
-                      [s]
-                      (postwalk 
-                       (fn [exp]
-                         (if (field-ref? exp)
-                           (list (field->keyword exp) s)
-                           exp))
-                       sexp)))})
-    sexp))
 
 (defmacro select [source & fields]
   `(select* ~source 
@@ -172,9 +196,6 @@
 
 
 ;; 4. Implementation - Clojure
-
-(defn in [v values]
-  (contains? (set values) v))
 
 (deftype ClojureDataSet [reducible]
   clojure.lang.Seqable
@@ -232,7 +253,8 @@
           (for [k result-keys
                 l (get lhs-groups k [{}])
                 r (get rhs-groups k [{}])]
-            (merge l r)))))))
+            ;; join exception also in SQL dataset is left first
+            (merge r l)))))))
 
   p/CollReduce
   (coll-reduce [_ f]
