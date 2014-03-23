@@ -29,9 +29,6 @@
 (defprotocol Queryable 
   (-parse-sexp [self sexp]))
 
-(defprotocol Schematic
-  (-fields [self] "Returns the set of fields for the datasource"))
-
 (defprotocol Selectable
   (-select [self fields]))
 

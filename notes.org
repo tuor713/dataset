@@ -2,6 +2,8 @@
 ** Purpose
 - Simplify cross-datasource data manipulation by consistent select, group, join syntax
 - Allow performance optimizations to run as close to native datasource speep
+
+
 ** Challenges
 - Cross-datasource joins are inefficient (result need to be loaded in
   memory on the client, join performance can be hard to steer).
@@ -85,21 +87,6 @@ is to use Clojure functions by default (maybe attach code for
 die-hard optimizers).
 
 
-** Implementation steps
-1. Design API
-2. Define internal protocols, single focus protocols rather than
-   bigger is better incohesive collections of methods. Need to support
-   - Select and manipulation
-   - Joins
-   - Group by
-   - Sort
-   - Limit, ideally also paging / iteration with bounds
-3. Defer design decisions that are not clear yet
-   Not all pluggability is needed, not all future extension points may
-   work out. But at the minimum this should mean to clearly factor
-   responsibilities and define appropriate interface / protocol
-   points to separate concerns.
-
 ** Design notes
 *** Define function before macros 
 Functions are more composeable and vastly more useful for
@@ -121,3 +108,10 @@ work for PersistentVector.
 1. Is there a better way to distinguish fields than :$field?
 2. How to make the functional API still usable with quoted code?
 3. Where to split the select clause syntactic sugar?
+
+** Next work items
+*** TODO Publish blog post
+*** TODO Implement csv data sets
+*** TODO Implement pass through where clauses
+*** TODO Implement web service and Citi internal
+*** TODO Support clojure.contrib.sql when other library is not available

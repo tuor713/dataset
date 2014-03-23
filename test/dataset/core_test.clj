@@ -5,6 +5,9 @@
         dataset.core
         dataset.sql))
 
+(require 'dataset.core :reload)
+(require 'dataset.sql :reload)
+
 
 ;; DB fixture
 
