@@ -49,6 +49,18 @@
        exp))
    sexp))
 
+(defn field-ref? [kw]
+  (and (keyword? kw) (.startsWith (name kw) "$")))
+
+(defn field->field-name [kw]
+  (if (field-ref? kw) 
+    (subs (name kw) 1) 
+    (name kw)))
+
+(defn field->keyword [kv]
+  (keyword (field->field-name kv)))
+
+
 (defmacro quote-with-code [sexp]
   (if (instance? clojure.lang.IObj sexp)
     `(with-meta ~(function-quote sexp)
@@ -63,17 +75,6 @@
                            exp))
                        sexp)))})
     sexp))
-
-(defn field-ref? [kw]
-  (and (keyword? kw) (.startsWith (name kw) "$")))
-
-(defn field->field-name [kw]
-  (if (field-ref? kw) 
-    (subs (name kw) 1) 
-    (name kw)))
-
-(defn field->keyword [kv]
-  (keyword (field->field-name kv)))
 
 (defn select* [source & fields]
   (if (satisfies? Selectable source)
