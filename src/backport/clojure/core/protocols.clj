@@ -6,7 +6,8 @@
 ;   the terms of this license.
 ;   You must not remove this notice, or any other, from this software.
 
-(ns backport.clojure.core.protocols)
+(ns backport.clojure.core.protocols
+  (:refer-clojure :exclude [reduced reduced?]))
 
 (set! *warn-on-reflection* true)
 

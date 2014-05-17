@@ -1,10 +1,20 @@
 (ns dataset.sql
   (:require [backport.clojure.core.reducers :as r]
             [backport.clojure.core.protocols :as p]
-            [clojure.java.jdbc :as sql]
-            [clojure.string :as s])
+            [clojure.string :as s]
+            [clojure.java.jdbc :as sql])
   (:use dataset.core
+        dataset.query
         [clojure.set :only [union intersection difference]]))
+
+;; SQL library adapters
+
+;; also a testing schim
+(defn ^:dynamic with-query-results [con q f]
+  (sql/db-query-with-resultset con [q] (comp f resultset-seq)))
+
+
+
 
 (deftype SQLQueryTransformer [functions]
   SexpQueryTransformer
@@ -44,11 +54,6 @@
     (name spec)
     nil))
 
-;; partially a testing schim
-(defn ^:dynamic with-query-results [con q f]
-  (sql/db-query-with-resultset con [q] f))
-
-
 (defprotocol SQLAttributes
   (db-spec [self])
   (db-fragment [self]))
@@ -62,7 +67,7 @@
   SQLFragment
   (sql-query [self con]
     (str "select " (if (seq projections) 
-                     (s/join "," (map (fn [[label selector]] (str selector " as " (name label))) 
+                     (s/join "," (map (fn [[label selector]] (str selector " as " (field->field-name label)))
                                       projections))
                      "*")
          " from " (if (string? source) source (str "(" (sql-query source con) ")"))
@@ -130,38 +135,85 @@
 
   Queryable
   (-parse-sexp [self sexp]
-    (-parse-sexp (dataset.core.ApplicativeQueryable. (SQLQueryTransformer. #{"concat"})) sexp))
+    (-parse-sexp (dataset.query.ApplicativeQueryable. (SQLQueryTransformer. #{"concat"})) sexp))
 
   Selectable
   (-select [self fields]
-    (SQLDataSet. spec (sql-select fragment fields)))
+    (let [parsed-fields (map (fn [[k exp]]
+                               (let [parsed (-parse-sexp self exp)]
+                                 [(if (= parsed invalid) :unsupported :supported)
+                                  k
+                                  (if (= parsed invalid) exp parsed)]))
+                          fields)
+          {supported :supported unsupported :unsupported} (group-by first parsed-fields)
+
+          ;; need to ensure dependencies for calculations of unsupported fields are passed through
+          ;; as well as calculation in native layer are passed through in later enrichment
+          unsupported-dependencies
+          (set (mapcat (comp field-refs last) unsupported))
+
+          inner (if (seq supported)
+                  (SQLDataSet. spec (sql-select fragment
+                                      (concat
+                                        (map rest supported)
+                                        (map
+                                          (fn [f] [f (-parse-sexp self f)])
+                                          unsupported-dependencies))))
+                  self)]
+      (if (seq unsupported)
+        (select-wrapper inner
+          (concat
+            (map rest unsupported)
+            (map (fn [[_ f _]] [f f]) supported)))
+        inner)))
 
   Filterable
   (-where [self conditions]
-    (SQLDataSet. spec (sql-where fragment conditions)))
+    (let [parsed-conditions
+          (map (fn [exp]
+                 (let [parsed (-parse-sexp self exp)]
+                   [(if (= parsed invalid) :unsupported :supported)
+                    (if (= parsed invalid) exp parsed)]))
+            conditions)
+
+          {supported :supported unsupported :unsupported} (group-by first parsed-conditions)
+
+
+          inner (if (seq supported)
+                  (SQLDataSet. spec (sql-where fragment (map second supported)))
+                  self)]
+      (if (seq unsupported)
+        (where-wrapper inner (map second unsupported))
+        inner)))
 
   Joinable
   (-join [self other options fields]
-    (if (and (instance? SQLDataSet other) (= spec (db-spec other)))
+    ;; (instance? SQLDataSet other), fails on 1.2.1 for no good reason
+    (if (and (= (class self) (class other))
+          (= spec (db-spec other)))
       (SQLDataSet.
        spec
        (SQLJoin. fragment 
                  (db-fragment other)
                  (:join-type options)
                  fields))
-      (-join (->clojure-dataset self) other options fields)))
+      (join-wrapper self other options fields)))
 
   p/CollReduce
   (coll-reduce 
     [_ f]
     (sql/with-db-connection [con spec]
-      (let [q (sql-query fragment (:connection con))]
-        (with-query-results con q (fn [res] (r/reduce f (resultset-seq res)))))))
+      (with-query-results
+        con
+        (sql-query fragment (:connection con))
+        #(r/reduce f %))))
   (coll-reduce 
     [_ f val]
     (sql/with-db-connection [con spec]
-      (let [q (sql-query fragment (:connection con))]
-        (with-query-results con q (fn [res] (r/reduce f val (resultset-seq res))))))))
+      (with-query-results
+        con
+        (sql-query fragment (:connection con))
+        #(r/reduce f val %)))))
 
 (defn sql-table->dataset
   [db-spec table]
@@ -170,9 +222,3 @@
 (defn sql-query->dataset
   [db-spec query]
   (SQLDataSet. db-spec (SQLQuery. query)))
-
-
-
-
-
-

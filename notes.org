@@ -93,6 +93,7 @@ Functions are more composeable and vastly more useful for
 extensibility. Macros on the other hand serve as the final veneer,
 like VAT they should only be applied in the final instance of usage. 
 
+
 ** Side notes
 *** Protocol hierarchies don't work well with extend
 For an individual protocol one can use extend-type to graft it onto
@@ -104,14 +105,20 @@ See for example PersistentVector extended to satisfy
 CollReduce. However, Selectable implemneted on CollReduce does not
 work for PersistentVector.
 
+
 ** Outstanding design questions
 1. Is there a better way to distinguish fields than :$field?
 2. How to make the functional API still usable with quoted code?
 3. Where to split the select clause syntactic sugar?
 
+
 ** Next work items
-*** TODO Publish blog post
 *** TODO Implement csv data sets
 *** TODO Implement pass through where clauses
 *** TODO Implement web service and Citi internal
 *** TODO Support clojure.contrib.sql when other library is not available
+*** TODO There is a distinction between invalid and unhandled as far as query parsing goes
+A filter / selector would be *unhandled* if it refers to a field that cannot be queried. 
+On the other hand it would be *invalid* if it refers to a field known not to exist. (Although one could 
+make an argument for future proofing assuming the future existence of certain fields?)
+

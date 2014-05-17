@@ -1,36 +1,17 @@
 (ns dataset.core
-  "Dataset library built on top of (backported) reducers library."
   (:require [backport.clojure.core.reducers :as r]
             [backport.clojure.core.protocols :as p]
-            [clojure.string :as s])
-  (:use [clojure.set :only [union intersection difference rename-keys]]
-        [clojure.walk :only [postwalk]]))
+            [clojure.string :as s]
+            [clojure.set :as set])
+  (:use [clojure.walk :only [postwalk]]))
 
 
-;; Let's separate:
-;; 1. Macro API
-;; 2. Functional API for data sources (Clojure methods handling the all around implementation)
-;; 3. Protocols used by functional API 
-;; 4. Implementations of these protocols for various actual sources
-
-(declare ->clojure-dataset cache lazy-cache)
-
-(defn in [v values]
-  (contains? (set values) v))
-
-;; 3. Data source protocols
-
-(defprotocol SexpQueryTransformer
-  (-to-value [self primitive])
-  (-to-field [self field-name])
-  (-operator? [self opname])
-  (-function? [self fname]))
-
-(defprotocol Queryable 
-  (-parse-sexp [self sexp]))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Data source protocols ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defprotocol Selectable
-  (-select [self fields]))
+  (-select [self fields] "A list of fields as [<field label> <exp>] pairs"))
 
 (defprotocol Filterable
   (-where [self conditions]))
@@ -38,76 +19,79 @@
 (defprotocol Joinable
   (-join [self other hints join-fields]))
 
-;; 2. Functional API
+(defprotocol Orderable
+  (-order [self sexps]))
 
 
-(defn- function-quote [sexp]
-  (postwalk
-   (fn [exp]
-     (if (list? exp)
-       `(list (quote ~(first exp)) ~@(rest exp))
-       exp))
-   sexp))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Query parsing utilities ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn field-ref? [kw]
   (and (keyword? kw) (.startsWith (name kw) "$")))
 
 (defn field->field-name [kw]
-  (if (field-ref? kw) 
-    (subs (name kw) 1) 
+  (if (field-ref? kw)
+    (subs (name kw) 1)
     (name kw)))
 
 (defn field->keyword [kv]
   (keyword (field->field-name kv)))
 
+(defn field-refs [form]
+  (cond
+    (or (list? form) (instance? clojure.lang.IMapEntry form) (seq? form) (coll? form))
+    (set (mapcat field-refs form))
+
+    (field-ref? form)
+    [form]
+
+    :else nil))
+
+(defn- function-quote [sexp]
+  (postwalk
+    (fn [exp]
+      (if (list? exp)
+        `(list (quote ~(first exp)) ~@(rest exp))
+        exp))
+    sexp))
 
 (defmacro quote-with-code [sexp]
   (if (instance? clojure.lang.IObj sexp)
     `(with-meta ~(function-quote sexp)
        {:function ~(let [s (gensym)]
                      (list
-                      'fn
-                      [s]
-                      (postwalk 
-                       (fn [exp]
-                         (if (field-ref? exp)
-                           (list (field->keyword exp) s)
-                           exp))
-                       sexp)))})
+                       'fn
+                       [s]
+                       (postwalk
+                         (fn [exp]
+                           (if (field-ref? exp)
+                             (list (field->keyword exp) s)
+                             exp))
+                         sexp)))})
     sexp))
 
-(defn select* [source & fields]
+
+;;;;;;;;;;;;;;;;;;;;
+;; Functional API ;;
+;;;;;;;;;;;;;;;;;;;;
+
+(declare where-wrapper select-wrapper order-wrapper join-wrapper in)
+
+(defn select* [source fields]
   (if (satisfies? Selectable source)
-    (let [converted (map (fn [[exp _ label]] [exp (-parse-sexp source exp) label]) 
-                         (map (fn [f] (if (keyword? f) [f :as (field->keyword f)] f)) fields))
-          handled-fields (map (juxt #(nth % 2) second)
-                              (remove #(= (second %) ::invalid) converted))
-          unhandled-fields (map (juxt first (constantly :as) #(nth % 2)) 
-                                (filter #(= (second %) ::invalid) converted))
-          with-handled (if (seq handled-fields)
-                         (-select source handled-fields)
-                         source)]
-      (if (seq unhandled-fields)
-        (apply select* (->clojure-dataset with-handled) unhandled-fields)
-        with-handled))
-    (apply select* (->clojure-dataset source) fields)))
+    (-select source fields)
+    (select-wrapper source fields)))
 
-
-;; A clojure wrapper means (unless we keep track of fields specially) that
-;; we can no longer run queries on the original, i.e. we only get best
-;; performance if we can safely reorder query steps
-(defn where* [source & conditions]
+(defn where* [source conditions]
   (if (satisfies? Filterable source)
-    (let [converted (map #(-> [% (-parse-sexp source %)]) conditions)
-          handled-conditions (remove #{::invalid} (keep second converted))
-          unhandled-conditions (keep #(when (= ::invalid (second %)) (first %)) converted)
-          with-handled (if (seq handled-conditions)
-                         (-where source handled-conditions)
-                         source)]
-      (if (seq unhandled-conditions)
-        (apply where* (->clojure-dataset with-handled) unhandled-conditions)
-        with-handled))
-    (apply where* (->clojure-dataset source) conditions)))
+    (-where source conditions)
+    (where-wrapper source conditions)))
+
+(defn order* [source expressions]
+  (if (satisfies? Orderable source)
+    (-order source expressions)
+    (order-wrapper source expressions)))
 
 (declare join*)
 
@@ -115,177 +99,178 @@
   (let [right? (= flow :right)
         extractor (apply juxt (map (comp field->keyword (if right? second first)) fields))
         combinations (r/reduce (fn [res rec]
-                                 (map conj res (extractor rec))) 
-                               (repeat (count fields) #{})
-                               (if right? right left))
-        
-        sink (apply where* (if right? left right)
-                    (map
-                     (fn [f selections] 
-                       (quote-with-code (in f selections)))
-                     (map (if right? first second) fields)
-                     combinations))]
-    (apply join* (if right? sink left) (if right? right sink) (assoc options :join-flow :none) fields)))
+                                 (map conj res (extractor rec)))
+                       (repeat (count fields) #{})
+                       (if right? right left))
 
-(defn join* 
+        sink (where* (if right? left right)
+               (map
+                 (fn [f selections]
+                   (quote-with-code (in f selections)))
+                 (map (if right? first second) fields)
+                 combinations))]
+    (join* (if right? sink left) (if right? right sink) (assoc options :join-flow :none) fields)))
+
+(defn join*
   "Supported options:
 - join-type: :left, :right, :inner (default), :outer
 - join-flow: :left, :right, :none, :auto (default). Note combinations like join-type=left, join-flow=right are invalid."
-  [left right 
+  [left right
    options
-   & fields]
+   fields]
   (let [params (merge {:join-type :inner :join-flow :auto} options)
         join-type (:join-type params)
         join-flow (:join-flow params)]
     (when (= #{:left :right} (set [join-type join-flow]))
-      (throw (IllegalArgumentException. 
-              (str "Illegal combination of join-type " join-type " and join-flow " join-flow))))
-    
+      (throw (IllegalArgumentException.
+               (str "Illegal combination of join-type " join-type " and join-flow " join-flow))))
+
     (let [sanitized-fields (map #(if (sequential? %) % [% %]) fields)]
       (cond
-       (= join-flow :left) (handle-join-flow left right join-flow options sanitized-fields)
-       (= join-flow :right) (handle-join-flow left right join-flow options sanitized-fields)
+        (= join-flow :left) (handle-join-flow left right join-flow options sanitized-fields)
+        (= join-flow :right) (handle-join-flow left right join-flow options sanitized-fields)
 
-       (satisfies? Joinable left) (-join left right params sanitized-fields)
-       :else (apply join* (->clojure-dataset left) right params sanitized-fields)))))
+        (satisfies? Joinable left) (-join left right params sanitized-fields)
+        :else (join-wrapper left right params sanitized-fields)))))
 
-;; 1. Macro API
+;;;;;;;;;;;;;;;;;;;;;;
+;; Macro / User API ;;
+;;;;;;;;;;;;;;;;;;;;;;
 
-(defmacro select [source & fields]
-  `(select* ~source 
-            ~@(map 
-               (fn [f] (if (vector? f)
-                         (vec (cons (list 'quote-with-code (first f)) (rest f)))
-                         (list 'quote-with-code f))) 
-               fields)))
+(defn in [v values]
+  (contains? (set values) v))
+
+(defmacro select
+  "Sample usage: (select <source> :$field [<exp> :as :$otherfield])"
+  [source & fields]
+  `(select* ~source
+     ~(vec (map
+             (fn [f] (if (vector? f)
+                       [(nth f 2) (list 'quote-with-code (first f))]
+                       [f (list 'quote-with-code f)]))
+             fields))))
 
 (defmacro where [source & conditions]
-  `(where* ~source ~@(map #(list 'quote-with-code %) conditions)))
+  `(where* ~source ~(vec (map #(list 'quote-with-code %) conditions))))
 
+(defmacro order [source & sexps]
+  `(order* ~source ~(vec (map #(list 'quote-with-code %) sexps))))
 
-(defmacro join [left right options & fields]
-  `(join* ~left ~right ~options ~@fields))
+(defn join [left right options & fields]
+  (join* left right options fields))
 
-
-;; 4. Implementation - Query parsing
-
-(def invalid ::invalid)
-
-(deftype ApplicativeQueryable [transformer]
-  Queryable
-  (-parse-sexp [self sexp]
-    (cond
-     (list? sexp) 
-     (let [args (map #(-parse-sexp self %) (rest sexp))
-           invalid? (some #{invalid} args)]
-       (cond
-        invalid? invalid
-        (-operator? transformer (str (first sexp))) (str "(" (s/join (str " " (first sexp) " ") args) ")")
-        (-function? transformer (str (first sexp))) (str (str (first sexp)) "(" (s/join "," args) ")")
-        :else invalid))
-
-     (or (set? sexp) (sequential? sexp))
-     (str "(" (s/join "," (map #(-parse-sexp self %) sexp)) ")")
-
-     (field-ref? sexp)
-     (-to-field transformer (field->field-name sexp))
-
-     :else (-to-value transformer sexp))))
-
-
-;; 4. Implementation - Clojure
-
-(deftype ClojureDataSet [reducible]
-  clojure.lang.Seqable
-  (seq [self] 
-    (seq (r/into [] self)))
-
-  Selectable
-  (-select [self fields]
-    (ClojureDataSet.
-     (r/map
-      (fn [rec]
-        (persistent!
-         (reduce
-          (fn [res [key f]] (assoc! res key (f rec)))
-          (transient {})
-          fields)))
-      self)))
-
-  Filterable
-  (-where [self conditions]
-    (ClojureDataSet.
-     (r/filter
-      (fn [rec] (every? #(% rec) conditions))
-      self)))
-
-  Queryable
-  (-parse-sexp [self sexp]
-    (or (:function (meta sexp)) 
-        (if (field-ref? sexp) 
-          (field->keyword sexp)
-          sexp)))
-
-  Joinable
-  (-join [self other options fields]
-    (ClojureDataSet.
-     (if (= (:join-type options) :cross)
-       ;; no caching here so that we make no assumptions on whether any of these
-       ;; datasets will fit into memory, users can pre-cache both datasets before
-       ;; passing them in the join if desired
-       (r/mapcat (fn [rec] (r/into [] (r/map #(merge rec %) other))) self)
-       
-       (lazy-seq
-        (let [lhskey (apply juxt (map (comp field->keyword first) fields))
-              rhskey (apply juxt (map (comp field->keyword second) fields))
-
-              lhs-groups (r/group-by lhskey self)
-              rhs-groups (r/group-by rhskey other)
-
-              result-keys
-              (case (:join-type options)
-                :left (keys lhs-groups)
-                :right (keys rhs-groups)
-                :inner (intersection (set (keys lhs-groups)) (set (keys rhs-groups)))
-                :outer (union (set (keys lhs-groups)) (set (keys rhs-groups))))]
-          (for [k result-keys
-                l (get lhs-groups k [{}])
-                r (get rhs-groups k [{}])]
-            ;; join exception also in SQL dataset is left first
-            (merge r l)))))))
-
-  p/CollReduce
-  (coll-reduce [_ f]
-    (p/coll-reduce reducible f))
-  (coll-reduce [_ f val]
-    (p/coll-reduce reducible f val)))
-
-(defn ->clojure-dataset
-  "Wrap a source in a Clojure source, this does not realize the dataset (as cache would do). 
-Instead all further operation are simply proxied on the Clojure source."
-  [source]
-  (ClojureDataSet. source))
 
 (defn lazy-cache [dataset]
-  (->clojure-dataset (lazy-seq (r/into [] dataset))))
+  (lazy-seq (r/into [] dataset)))
 
 (defn cache [dataset]
-  (->clojure-dataset (r/into [] dataset)))
+  (r/into [] dataset))
 
 
-;; Misc utilities
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Implementation - Clojure ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defn label [dataset namespace]
-  (->clojure-dataset
-   (r/map 
-    (fn [rec]
-      (into {}
-            (map 
-             (fn [e] [(keyword (name namespace) (name (key e))) (val e)])
-             rec)))
-    dataset)))
+(defn- sexp->fn [sexp]
+  (or (:function (meta sexp))
+    (if (field-ref? sexp)
+      (field->keyword sexp)
+      sexp)))
 
 
+;; No support for where reordering. If there are non-native where clauses in the chain
+;; they will have to be manually reordered for now.
+;; The alternative of weight based path optimization transforms this from a library to an engine
+;; and takes away predictability, which is not desired.
+(defn where-wrapper [source conditions]
+  (let [parsed-conditions (map sexp->fn conditions)]
+    (r/filter
+      (fn [rec] (every? #(% rec) parsed-conditions))
+      source)))
+
+(defn select-wrapper [source fields]
+  (let [;; to allow some push behaviour we want to exclude one-to-one mappings
+        output-fields (set (keep (fn [[k exp]] (when-not (= k exp) k)) fields))
+        parsed-fields (map (fn [[k sexp]] [(field->keyword k) (sexp->fn sexp)]) fields)
+        mapped-source
+        (r/map
+          (fn [rec]
+            (persistent!
+              (reduce
+                (fn [res [key f]] (assoc! res key (f rec)))
+                (transient {})
+                parsed-fields)))
+          source)]
+    (reify
+      Filterable
+      (-where [self conditions]
+        (let [{pushable true unpushable false}
+              (group-by #(empty? (set/intersection (set (field-refs %)) output-fields)) conditions)
+              inner (if (seq pushable) (where* source pushable) source)]
+          (where-wrapper
+            (select-wrapper inner fields)
+            unpushable)))
+
+      p/CollReduce
+      (coll-reduce [_ f]
+        (p/coll-reduce mapped-source f))
+      (coll-reduce [_ f val]
+        (p/coll-reduce mapped-source f val)))))
+
+(defn order-wrapper [source sexps]
+  (let [fs (map sexp->fn sexps)]
+    (sort-by
+      (fn [rec] (vec (map #(% rec) fs)))
+      (r/into [] source))))
 
 
+(defn- rec-join [lhskey rhskey lhs rhs join-type]
+  (let [left-side? (or (= :outer join-type) (= :left join-type))
+        right-side? (or (= :outer join-type) (= :right join-type))]
+    (cond
+      (not lhs) (when right-side? (apply concat rhs))
+      (not rhs) (when left-side? (apply concat lhs))
 
+      :else
+      (let [glhs (first lhs)
+            grhs (first rhs)
+            c (compare (lhskey (first glhs)) (rhskey (first grhs)))]
+        (cond
+          (= c 0)
+          (lazy-cat (for [l glhs r grhs] (merge r l))
+            (rec-join lhskey rhskey (next lhs) (next rhs) join-type))
+
+          (< c 0)
+          (lazy-cat (when left-side? glhs)
+            (rec-join lhskey rhskey (next lhs) rhs join-type))
+
+          (> c 0)
+          (lazy-cat (when right-side? grhs)
+            (rec-join lhskey rhskey lhs (next rhs) join-type)))))))
+
+(defn- clojure-join [lhskey rhskey lhs rhs join-type]
+  (rec-join
+    lhskey
+    rhskey
+    (seq (partition-by lhskey lhs))
+    (seq (partition-by rhskey rhs))
+    join-type))
+
+(defn join-wrapper [left right options fields]
+  (if (= (:join-type options) :cross)
+    ;; no caching here so that we make no assumptions on whether any of these
+    ;; datasets will fit into memory, users can pre-cache both datasets before
+    ;; passing them in the join if desired
+    (r/mapcat (fn [rec] (r/into [] (r/map #(merge rec %) right))) left)
+
+    ;; sort and merge algorithm since we are already dealing with in-memory datasets at this point
+    ;; Sorting is in theory N logN as compared to hashing which should be N
+    (lazy-seq
+      (let [lhskey (apply juxt (map (comp field->keyword first) fields))
+            rhskey (apply juxt (map (comp field->keyword second) fields))
+
+            lhssorted (sort-by lhskey (r/into [] left))
+            rhssorted (sort-by rhskey (r/into [] right))]
+        (clojure-join lhskey rhskey lhssorted rhssorted (:join-type options))))))
+
+;; end

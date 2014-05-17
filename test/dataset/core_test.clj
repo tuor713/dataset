@@ -2,7 +2,10 @@
   (:require [clojure.java.jdbc :as sql]
             [backport.clojure.core.reducers :as r])
   (:use clojure.test
+        [clojure.java.io :only [file]]
         dataset.core
+        dataset.csv
+        dataset.query
         dataset.sql))
 
 (require 'dataset.core :reload)
@@ -45,9 +48,7 @@
     (sql/execute! db-con ["drop table risk if exists"])
     (sql/execute! db-con ["create table risk (tradeid int, pv double, cr01 double, ir01 double, theta double)"])
     (sql/insert! db-con :risk {:tradeid 1 :pv 1200 :cr01 3 :ir01 1.5 :theta 0.2})
-    (sql/insert! db-con :risk {:tradeid 2 :pv -2000 :cr01 -4 :ir01 -1 :theta 0.3})
-    
-    ))
+    (sql/insert! db-con :risk {:tradeid 2 :pv -2000 :cr01 -4 :ir01 -1 :theta 0.3})))
 
 (defn query [sql]
   (sql/with-db-connection [db-con db-spec]
@@ -59,7 +60,7 @@
     (f)))
 
 (deftest test-sql-query-conversion
-  (let [sut (dataset.core.ApplicativeQueryable. 
+  (let [sut (dataset.query.ApplicativeQueryable.
              (dataset.sql.SQLQueryTransformer. #{"concat"}))]
     ;; primitives
     (is (= "1" (-parse-sexp sut '1)))
@@ -88,6 +89,20 @@
     ;; combinations
     (is (= "(greeting = concat('hello','world'))"
            (-parse-sexp sut '(= :$greeting (concat "hello" "world")))))))
+
+(deftest test-simple-queryable
+  (let [sut (dataset.query.SimpleQueryable. (constantly true) #{'= 'in})
+        sut2 (dataset.query.SimpleQueryable. #{:$a :$b} #{'= 'in})]
+    (is (= invalid (-parse-sexp sut '1)))
+    (is (= '(= 1 2) (-parse-sexp sut '(= 1 2))))
+    (is (= invalid (-parse-sexp sut '(< 1 2))))
+    (is (= '(= :$a "hello") (-parse-sexp sut '(= :$a "hello"))))
+    (is (= '(= :$a 42) (-parse-sexp sut '(= :$a (* 6 7)))))
+    (is (= invalid (-parse-sexp sut '(= :$a (+ :$b 1)))))
+    (is (= '(in :$a [1 2]) (-parse-sexp sut '(in :$a [1 2]))))
+    (is (= '(= :$a 1) (-parse-sexp sut2 '(= :$a 1))))
+    (is (= invalid (-parse-sexp sut2 '(= :$notsupported 1))))
+    ))
 
 
 (defn to-vec [ds] (r/into [] ds))
@@ -194,15 +209,32 @@
 
       (let [joindata (join accounts (cache hierarchy) {} :$strategy)]
         (is (= #{["ACCSOV" "Flow Credit Trading"] ["ACCRUS" "EM Credit Trading"] ["ACCAFR" "EM Credit Trading"]}
-               (to-set (r/map (juxt :mnemonic :business) joindata))))))))
+               (to-set (r/map (juxt :mnemonic :business) joindata)))))
+
+      (is (= #{{:mnem "SOV" :strategy "001"}
+               {:mnem "RUS" :strategy "002"}
+               {:mnem "AFR" :strategy "002"}}
+            (to-set (select accounts [(subs :$mnemonic 3) :as :mnem] :$strategy))))
+
+      ;; select / where re-ordering for where clause that can be pushed into native
+
+      (let [mapper (partial r/map :mnem)]
+        (is (= #{"SOV"}
+              (-> accounts
+                (select [(subs :$mnemonic 3) :as :mnem] :$strategy)
+                (where (= :$strategy "001"))
+                (mapper)
+                (to-set)))))
+      (is (= @last-query "select strategy as strategy,mnemonic as mnemonic from accounts where (strategy = '001')"))
+      )))
 
 
 (deftest test-clojure-datasource
-  (let [data (->clojure-dataset [{:mnemonic "ACCSOV"}
-                                 {:mnemonic "ACCRUS"}
-                                 {:mnemonic "ACCAFR"}])]
+  (let [data [{:mnemonic "ACCSOV"}
+              {:mnemonic "ACCRUS"}
+              {:mnemonic "ACCAFR"}]]
     (is (= #{{:mnem "SOV"} {:mnem "RUS"} {:mnem "AFR"}}
-           (to-set (select data [(subs :$mnemonic 3) :as :mnem]))))
+           (to-set (select data [(subs :$mnemonic 3) :as :$mnem]))))
 
     (is (= ["ACCSOV"]
            (to-vec (r/map :mnemonic (where data (.contains :$mnemonic "SOV"))))))))
@@ -235,3 +267,13 @@
 
     (is (= [{:a 1 :b 2 :c 3}]
            (to-vec (join [{:a 1 :b 2}] [{:a 4 :b 2 :c 3}] {} :$b))))))
+
+
+(deftest test-csvs
+  (is (= #{"elephant" "lion" "kangaroo" "bison"} 
+         (r/into #{} (r/map :name (csv-dataset (file "test/data/animals.csv"))))))
+  (is (= #{"elephant" "lion" "kangaroo" "bison"} 
+         (r/into #{} (r/map :name (csv-dataset (file "test/data/animals2.csv") \|)))))
+  (is (= {:continent "africa;asia", :type "herbivore", :name "elephant"}
+         (first (seq (csv-dataset (file "test/data/animals.csv")))))))
+
