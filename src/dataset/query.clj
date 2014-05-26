@@ -58,10 +58,18 @@
       (field-ref? sexp) invalid
       :else sexp)))
 
+(defn- normalize-form [form]
+  (if (and (= (first form) '=)
+           (= (count form) 3)
+           (field-ref? (nth form 2)))
+    (list (first form) (nth form 2) (second form))
+    form))
+
 ;; single level queryable, nested queries are evaluated in Clojure where possible (i.e. known functions and no field references)
 ;; - (= :$a 1)
 ;; - (in :$a #{1 2 3})
 ;; - (= :$field (+ 1 2 3))
+;; Will reject multifield predicates such as (= $:a $:b). Also will reorder = predicate so field reference appears first
 (deftype SimpleQueryable [supported-field? supported-ops]
   Queryable
   (-parse-sexp [self sexp]
@@ -71,8 +79,17 @@
                      (if (field-ref? v)
                        (if (supported-field? v) v invalid)
                        (-parse-sexp (ClojureQueryable.) v)))
-                   (rest sexp))]
-        (if (or (some #{invalid} args) (not (contains? supported-ops (first sexp))))
+                   (rest sexp))
+            multiple-fields? (> (count (filter field-ref? (rest sexp))) 1)]
+        (if (or (some #{invalid} args)
+                (not (contains? supported-ops (first sexp)))
+                multiple-fields?)
           invalid
-          (apply list (first sexp) args)))
+          (normalize-form (apply list (first sexp) args))))
       invalid)))
+
+;; Actually what I would like is to be able to define a list of valid forms
+;; which are acceptable and then the query parser handles those.
+
+
+

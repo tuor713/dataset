@@ -182,11 +182,17 @@
 ;; they will have to be manually reordered for now.
 ;; The alternative of weight based path optimization transforms this from a library to an engine
 ;; and takes away predictability, which is not desired.
-(defn where-wrapper [source conditions]
+(defn where-wrapper
+  "Default implementation of Filterable protocol handled in Clojure.
+  Delegate to this function for where clauses not natively handled."
+  [source conditions]
   (let [parsed-conditions (map sexp->fn conditions)]
     (r/filter
       (fn [rec] (every? #(% rec) parsed-conditions))
       source)))
+
+
+
 
 (defn select-wrapper [source fields]
   (let [;; to allow some push behaviour we want to exclude one-to-one mappings

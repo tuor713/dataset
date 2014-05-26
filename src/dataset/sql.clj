@@ -14,11 +14,9 @@
   (sql/db-query-with-resultset con [q] (comp f resultset-seq)))
 
 
-
-
 (deftype SQLQueryTransformer [functions]
   SexpQueryTransformer
-  (-to-value [self primitive] 
+  (-to-value [self primitive]
     (cond
      (nil? primitive) "null"
      (string? primitive) (str "'" primitive "'")
@@ -37,10 +35,10 @@
 
 (defn- to-query [attrs]
   (str "select " (if (seq (:fields attrs))
-                   (s/join "," (map (fn [[label selector]] (str selector " as " (name label))) 
+                   (s/join "," (map (fn [[label selector]] (str selector " as " (name label)))
                                     (:fields attrs)))
                    "*")
-       " from " 
+       " from "
        (if (not (s/blank? (:query attrs)))
          (str "(" (:query attrs) ")")
          (:table attrs))
@@ -66,7 +64,7 @@
 (defrecord SQLDelegate [source projections conditions]
   SQLFragment
   (sql-query [self con]
-    (str "select " (if (seq projections) 
+    (str "select " (if (seq projections)
                      (s/join "," (map (fn [[label selector]] (str selector " as " (field->field-name label)))
                                       projections))
                      "*")
@@ -99,25 +97,25 @@
   (sql-query [self con]
     (let [q1 (sql-query left con)
           q2 (sql-query right con)
-          
+
           common-join-cols (set (keep (fn [[l r]] (when (= l r) (s/lower-case (field->field-name l)))) fields))
 
           left-columns (set (query->columns con q1))
           right-columns (set (query->columns con q2))]
-      (str "select " 
+      (str "select "
            (s/join ", "
                    (concat (difference left-columns right-columns)
                            (difference right-columns left-columns)
-                           (map 
-                            #(if (contains? common-join-cols (s/lower-case %)) 
+                           (map
+                            #(if (contains? common-join-cols (s/lower-case %))
                                (str (if (= join-type :right) "rhs." "lhs.") %)
                                (str "coalesce(lhs." % ", rhs." % ") as " %))
                             (intersection left-columns right-columns))))
            " from (" q1 ") lhs"
            " " (name join-type) " join (" q2 ") rhs"
-           " on (" 
-           (s/join " and " (map 
-                            (fn [[l r]] (str "lhs." (field->field-name l) 
+           " on ("
+           (s/join " and " (map
+                            (fn [[l r]] (str "lhs." (field->field-name l)
                                              " = "
                                              "rhs." (field->field-name r)))
                             fields))
@@ -193,21 +191,21 @@
           (= spec (db-spec other)))
       (SQLDataSet.
        spec
-       (SQLJoin. fragment 
+       (SQLJoin. fragment
                  (db-fragment other)
                  (:join-type options)
                  fields))
       (join-wrapper self other options fields)))
 
   p/CollReduce
-  (coll-reduce 
+  (coll-reduce
     [_ f]
     (sql/with-db-connection [con spec]
       (with-query-results
         con
         (sql-query fragment (:connection con))
         #(r/reduce f %))))
-  (coll-reduce 
+  (coll-reduce
     [_ f val]
     (sql/with-db-connection [con spec]
       (with-query-results
@@ -220,5 +218,7 @@
   (SQLDataSet. db-spec (SQLDelegate. table [] [])))
 
 (defn sql-query->dataset
+  "Create an SQL dataset from a given query. Additional select, where, joins etc
+  will be wrapped around the query."
   [db-spec query]
   (SQLDataSet. db-spec (SQLQuery. query)))
