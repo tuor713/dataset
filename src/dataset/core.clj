@@ -143,18 +143,18 @@
 (defmacro select
   "Sample usage: (select <source> :$field [<exp> :as :$otherfield])"
   [source & fields]
-  `(select* ~source
+  `(dataset.core/select* ~source
      ~(vec (map
              (fn [f] (if (vector? f)
-                       [(nth f 2) (list 'quote-with-code (first f))]
-                       [f (list 'quote-with-code f)]))
+                       [(nth f 2) (list 'dataset.core/quote-with-code (first f))]
+                       [f (list 'dataset.core/quote-with-code f)]))
              fields))))
 
 (defmacro where [source & conditions]
-  `(where* ~source ~(vec (map #(list 'quote-with-code %) conditions))))
+  `(dataset.core/where* ~source ~(vec (map #(list 'dataset.core/quote-with-code %) conditions))))
 
 (defmacro order [source & sexps]
-  `(order* ~source ~(vec (map #(list 'quote-with-code %) sexps))))
+  `(dataset.core/order* ~source ~(vec (map #(list 'dataset.core/quote-with-code %) sexps))))
 
 (defn join [left right options & fields]
   (join* left right options fields))
